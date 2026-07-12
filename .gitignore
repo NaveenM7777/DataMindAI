@@ -1,0 +1,30 @@
+# Virtual Environment
+venv/
+
+# Environment Variables
+.env
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Streamlit
+.streamlit/
+
+# Model Files
+models/
+
+# Vector Database
+vectorstore/
+
+# Uploaded Files
+uploads/
+
+# Logs
+*.log
