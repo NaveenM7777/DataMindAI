@@ -1,6 +1,5 @@
 import streamlit as st
 from streamlit_option_menu import option_menu
-
 from app.grok_chat import show_grok_chat
 from app.theme import apply_theme
 from app.preprocessing import show_preprocessing
@@ -141,3 +140,19 @@ if df is not None:
 
     elif selected == "AI Agent":
         show_agent_chat(df)
+
+
+st.markdown("---")
+
+st.markdown(
+    """
+    <div style="text-align:center; color:gray; padding:20px;">
+        Built by <b>Naveen Mahasamudram</b><br>
+        DataMind AI © 2026
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+
+st.markdown("---")
