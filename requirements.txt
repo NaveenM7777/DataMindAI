@@ -15,4 +15,3 @@ faiss-cpu==1.13.2
 sentence-transformers==3.0.1
 pymupdf
 streamlit-option-menu
-torch==2.7.1
