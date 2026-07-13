@@ -1,182 +1,199 @@
 import streamlit as st
 
-from app.agent_router import route_request
-from app.agent_tools import TOOL_REGISTRY
+from app.rag_loader import extract_text_from_pdf, get_pdf_metadata
+from app.rag_chunker import chunk_text_with_metadata
+from app.rag_embeddings import create_embeddings, create_query_embedding
+from app.rag_vectorstore import VectorStore
+from app.rag_llm import ask_with_context
 
 
-_TOOL_LABELS = {
-    "ai_chat": "💬 AI Chat",
-    "rag": "📄 RAG (PDF)",
-    "ml_quick": "🤖 Machine Learning",
-    "eda_summary": "📊 EDA",
-    "preprocessing_summary": "🧹 Preprocessing"
-}
+def show_rag_chat():
 
-
-def _format_tool_labels(tool_names):
-
-    labels = [_TOOL_LABELS.get(name, name) for name in tool_names]
-
-    return " + ".join(labels)
-
-
-def show_agent_chat(df):
-
-    st.title("🤖 AI Agent")
+    st.title("📄 Chat With Your PDF")
 
     st.markdown("---")
 
-    st.caption(
-        "Ask a question or give a task. The Agent will automatically pick "
-        "one or two tools needed — Machine Learning, EDA, Preprocessing, "
-        "AI Chat, or RAG — and combine the results if needed. It also "
-        "remembers recent conversation context for follow-up questions."
+    # =====================================================
+    # Upload
+    # =====================================================
+
+    st.subheader("📤 Upload PDF")
+
+    uploaded_file = st.file_uploader(
+        "Upload a PDF document",
+        type=["pdf"],
+        key="rag_pdf_uploader"
     )
 
-    with st.expander("🧰 Available Tools"):
+    if uploaded_file is not None:
 
-        for tool_name, tool_info in TOOL_REGISTRY.items():
+        current_file_id = f"{uploaded_file.name}_{uploaded_file.size}"
 
-            label = _TOOL_LABELS.get(tool_name, tool_name)
+        if st.session_state.get("rag_file_id") != current_file_id:
 
-            st.markdown(f"**{label}** — {tool_info['description']}")
+            with st.spinner("Reading PDF and building search index..."):
+
+                try:
+
+                    metadata = get_pdf_metadata(uploaded_file)
+
+                    full_text, page_texts = extract_text_from_pdf(uploaded_file)
+
+                    if not full_text or not full_text.strip():
+
+                        st.error("❌ No extractable text found in this PDF. It may be scanned/image-based.")
+
+                        return
+
+                    chunks_with_meta = chunk_text_with_metadata(
+                        page_texts,
+                        chunk_size=500,
+                        chunk_overlap=50
+                    )
+
+                    chunk_texts_only = [c["text"] for c in chunks_with_meta]
+
+                    embeddings = create_embeddings(chunk_texts_only)
+
+                    if embeddings is None or len(embeddings) == 0:
+
+                        st.error("❌ Failed to create embeddings for this document.")
+
+                        return
+
+                    store = VectorStore(embedding_dim=embeddings.shape[1])
+
+                    store.add(embeddings, chunks_with_meta)
+
+                    st.session_state["rag_file_id"] = current_file_id
+                    st.session_state["rag_vectorstore"] = store
+                    st.session_state["rag_metadata"] = metadata
+                    st.session_state["rag_chunk_count"] = len(chunks_with_meta)
+                    st.session_state["rag_chat_history"] = []
+
+                except Exception as e:
+
+                    st.error(f"❌ Failed to process PDF: {e}")
+
+                    return
+
+        st.success("✅ PDF Loaded Successfully")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+
+            st.metric("Pages", st.session_state["rag_metadata"]["page_count"])
+
+        with col2:
+
+            st.metric("Chunks Created", st.session_state["rag_chunk_count"])
+
+        with col3:
+
+            st.metric("File Size", f"{st.session_state['rag_metadata']['file_size_kb']} KB")
+
+        st.caption("Embedding Model: **all-MiniLM-L6-v2** | Vector Store: **FAISS**")
+
+    # =====================================================
+    # Chat
+    # =====================================================
+
+    if "rag_vectorstore" not in st.session_state or st.session_state["rag_vectorstore"].is_empty():
+
+        st.info("Upload a PDF above to start asking questions.")
+
+        return
 
     st.markdown("---")
 
-    if "agent_history" not in st.session_state:
+    st.subheader("💬 Ask a Question")
 
-        st.session_state["agent_history"] = []
+    if "rag_chat_history" not in st.session_state:
 
-    for turn in st.session_state["agent_history"]:
+        st.session_state["rag_chat_history"] = []
+
+    for turn in st.session_state["rag_chat_history"]:
 
         with st.chat_message(turn["role"]):
 
             st.markdown(turn["content"])
 
-            if turn["role"] == "assistant" and "tools_used" in turn:
+            if turn["role"] == "assistant" and "sources" in turn:
 
-                label = _format_tool_labels(turn["tools_used"])
+                with st.expander("📚 Sources Used"):
 
-                st.caption(f"🔧 Tool(s) used: {label}")
+                    for src in turn["sources"]:
 
-    if st.session_state.get("agent_awaiting_target"):
+                        st.write(f"Chunk {src['chunk_id']} — Page {src['page']}")
 
-        st.warning("🎯 I need to know which column to predict before training.")
+    user_question = st.chat_input("Ask something about this PDF...")
 
-        available_columns = st.session_state["agent_available_columns"]
+    if user_question:
 
-        selected_target = st.selectbox(
-            "Select the target column to predict:",
-            available_columns,
-            key="agent_target_select"
-        )
-
-        if st.button("✅ Confirm Target and Train"):
-
-            pending_question = st.session_state["agent_pending_question"]
-
-            with st.spinner("Training with your selected target column..."):
-
-                response = route_request(
-                    df,
-                    pending_question,
-                    target_column=selected_target,
-                    conversation_history=st.session_state["agent_history"]
-                )
-
-            with st.chat_message("assistant"):
-
-                st.markdown(response["result"])
-
-                label = _format_tool_labels(response["tools_used"])
-
-                st.caption(f"🔧 Tool(s) used: {label}")
-
-            st.session_state["agent_history"].append({
-                "role": "assistant",
-                "content": response["result"],
-                "tools_used": response["tools_used"]
-            })
-
-            st.session_state["agent_awaiting_target"] = False
-            st.session_state["agent_pending_question"] = None
-            st.session_state["agent_available_columns"] = None
-
-            st.rerun()
-
-        return
-
-    user_request = st.chat_input("Ask the Agent to do something...")
-
-    if user_request:
-
-        st.session_state["agent_history"].append({
+        st.session_state["rag_chat_history"].append({
             "role": "user",
-            "content": user_request
+            "content": user_question
         })
 
         with st.chat_message("user"):
-            st.markdown(user_request)
+            st.markdown(user_question)
 
         with st.chat_message("assistant"):
 
-            with st.spinner("Agent is deciding which tool(s) to use..."):
+            with st.spinner("Searching document and thinking..."):
 
-                # Pass history EXCLUDING the message just added, since it's
-                # sent separately as the current request
-                history_without_last = st.session_state["agent_history"][:-1]
+                try:
 
-                response = route_request(
-                    df,
-                    user_request,
-                    conversation_history=history_without_last
-                )
+                    query_embedding = create_query_embedding(user_question)
 
-            if response.get("needs_target_selection"):
+                    retrieved_chunks = st.session_state["rag_vectorstore"].search(
+                        query_embedding,
+                        top_k=3
+                    )
 
-                st.session_state["agent_awaiting_target"] = True
-                st.session_state["agent_pending_question"] = user_request
-                st.session_state["agent_available_columns"] = response["available_columns"]
+                    history_without_last = st.session_state["rag_chat_history"][:-1]
 
-                st.info("🎯 Please select the target column below to continue.")
+                    answer = ask_with_context(
+                        question=user_question,
+                        retrieved_chunks=retrieved_chunks,
+                        chat_history=history_without_last
+                    )
 
-                st.rerun()
+                except Exception as e:
 
-            else:
+                    answer = f"❌ Something went wrong: {e}"
 
-                st.markdown(response["result"])
+                    retrieved_chunks = []
 
-                if response["tools_used"]:
+                st.markdown(answer)
 
-                    label = _format_tool_labels(response["tools_used"])
+                if retrieved_chunks:
 
-                    st.caption(f"🔧 Tool(s) used: {label}")
+                    with st.expander("📚 Sources Used"):
 
-                    if len(response["tools_used"]) > 1 and "raw_tool_results" in response:
+                        for src in retrieved_chunks:
 
-                        with st.expander("🔍 See individual tool outputs"):
+                            st.write(f"Chunk {src['chunk_id']} — Page {src['page']}")
 
-                            for r in response["raw_tool_results"]:
+        st.session_state["rag_chat_history"].append({
+            "role": "assistant",
+            "content": answer,
+            "sources": retrieved_chunks
+        })
 
-                                tool_label = _TOOL_LABELS.get(r["tool"], r["tool"])
-
-                                st.markdown(f"**{tool_label}:**")
-
-                                st.markdown(r["result"])
-
-                                st.markdown("---")
-
-                st.session_state["agent_history"].append({
-                    "role": "assistant",
-                    "content": response["result"],
-                    "tools_used": response["tools_used"]
-                })
+    # =====================================================
+    # Clear
+    # =====================================================
 
     st.markdown("---")
 
-    if st.button("🗑️ Clear Agent Chat"):
+    if st.button("🗑️ Clear PDF & Chat"):
 
-        st.session_state["agent_history"] = []
-        st.session_state["agent_awaiting_target"] = False
+        for key in ["rag_file_id", "rag_vectorstore", "rag_metadata", "rag_chunk_count", "rag_chat_history"]:
+
+            if key in st.session_state:
+
+                del st.session_state[key]
 
         st.rerun()

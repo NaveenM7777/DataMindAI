@@ -29,7 +29,8 @@ def show_agent_chat(df):
     st.caption(
         "Ask a question or give a task. The Agent will automatically pick "
         "one or two tools needed — Machine Learning, EDA, Preprocessing, "
-        "AI Chat, or RAG — and combine the results if needed."
+        "AI Chat, or RAG — and combine the results if needed. It also "
+        "remembers recent conversation context for follow-up questions."
     )
 
     with st.expander("🧰 Available Tools"):
@@ -58,10 +59,6 @@ def show_agent_chat(df):
 
                 st.caption(f"🔧 Tool(s) used: {label}")
 
-    # =====================================================
-    # Handle pending target column selection
-    # =====================================================
-
     if st.session_state.get("agent_awaiting_target"):
 
         st.warning("🎯 I need to know which column to predict before training.")
@@ -80,7 +77,12 @@ def show_agent_chat(df):
 
             with st.spinner("Training with your selected target column..."):
 
-                response = route_request(df, pending_question, target_column=selected_target)
+                response = route_request(
+                    df,
+                    pending_question,
+                    target_column=selected_target,
+                    conversation_history=st.session_state["agent_history"]
+                )
 
             with st.chat_message("assistant"):
 
@@ -104,10 +106,6 @@ def show_agent_chat(df):
 
         return
 
-    # =====================================================
-    # Normal chat input
-    # =====================================================
-
     user_request = st.chat_input("Ask the Agent to do something...")
 
     if user_request:
@@ -124,7 +122,15 @@ def show_agent_chat(df):
 
             with st.spinner("Agent is deciding which tool(s) to use..."):
 
-                response = route_request(df, user_request)
+                # Pass history EXCLUDING the message just added, since it's
+                # sent separately as the current request
+                history_without_last = st.session_state["agent_history"][:-1]
+
+                response = route_request(
+                    df,
+                    user_request,
+                    conversation_history=history_without_last
+                )
 
             if response.get("needs_target_selection"):
 
