@@ -7,7 +7,6 @@ load_dotenv()
 _API_KEY = os.getenv("GROQ_API_KEY")
 
 _MODEL_NAME = "llama-3.1-8b-instant"
-
 _client = None
 
 
