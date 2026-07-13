@@ -48,12 +48,7 @@ def _build_tools_schema():
     return tools_schema
 
 
-def _synthesize_final_answer(user_request, tool_results):
-    """
-    Combines outputs from multiple tools into one coherent answer.
-
-    tool_results: list of dicts [{"tool": str, "result": str}, ...]
-    """
+def _synthesize_final_answer(user_request, tool_results, conversation_history=None):
 
     combined_context = "\n\n".join([
 
@@ -63,22 +58,40 @@ def _synthesize_final_answer(user_request, tool_results):
 
     ])
 
-    synthesis_prompt = f"""The user asked: "{user_request}"
+    history_text = ""
+
+    if conversation_history:
+
+        history_lines = []
+
+        for turn in conversation_history[-6:]:  # last 6 turns for context, keeps prompt size reasonable
+
+            role = "User" if turn["role"] == "user" else "Assistant"
+
+            history_lines.append(f"{role}: {turn['content']}")
+
+        history_text = "\n".join(history_lines)
+
+    synthesis_prompt = f"""Recent conversation so far:
+{history_text}
+
+The user's latest request: "{user_request}"
 
 Multiple tools were used to gather information. Here are their raw results:
 
 {combined_context}
 
 Write one single, clear, well-organized answer for the user that combines the
-relevant information from these results. Do not just repeat both results
-separately — actually integrate them into a coherent response that directly
-addresses what the user asked.
+relevant information from these results, taking into account the conversation
+context above (e.g. if the user is following up on something previously discussed).
+Do not just repeat both results separately — actually integrate them into a
+coherent response that directly addresses what the user asked.
 """
 
     response = _client.chat.completions.create(
         model=_MODEL_NAME,
         messages=[
-            {"role": "system", "content": "You are a helpful data science assistant that synthesizes information clearly."},
+            {"role": "system", "content": "You are a helpful data science assistant that synthesizes information clearly, using conversation context when relevant."},
             {"role": "user", "content": synthesis_prompt}
         ],
         temperature=0.3,
@@ -88,13 +101,13 @@ addresses what the user asked.
     return response.choices[0].message.content
 
 
-def route_request(df, user_request, target_column=None):
+def route_request(df, user_request, target_column=None, conversation_history=None):
     """
-    Sends the user's request to Groq with tool definitions, lets the model
-    pick ONE or TWO tools, executes them, and returns the combined result.
+    Sends the user's request to Groq with tool definitions AND recent
+    conversation history, so follow-up questions are routed with context
+    in mind rather than treated as fully independent requests.
 
-    Returns: dict {"tools_used": list of str, "result": str}
-    or, if ML needs a target column: dict with "needs_target_selection"
+    conversation_history: list of {"role": "user"/"assistant", "content": str}
     """
 
     _ensure_configured()
@@ -103,18 +116,34 @@ def route_request(df, user_request, target_column=None):
 
     system_prompt = (
         "You are the routing brain of DataMind AI, a data science platform. "
-        "Based on the user's request, choose the tool(s) needed to fulfill it. "
-        "Most requests need only ONE tool. Only choose TWO tools if the request "
-        "clearly needs information from two different sources — for example, "
-        "explaining ML results using a PDF's requirements, or combining dataset "
-        "insights with document content. Never choose more than two tools. "
-        "Always call at least one tool — do not answer directly without a tool."
+        "Based on the user's request AND the recent conversation context, choose "
+        "the tool(s) needed to fulfill it. Most requests need only ONE tool. Only "
+        "choose TWO tools if the request clearly needs information from two "
+        "different sources. Never choose more than two tools. If the user's "
+        "request is a follow-up (e.g. 'explain that more', 'what about the other one'), "
+        "use the conversation history to understand what they're referring to before "
+        "picking a tool. Always call at least one tool — do not answer directly "
+        "without using a tool."
     )
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_request}
-    ]
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Include recent conversation history so the router understands follow-ups
+    if conversation_history:
+
+        for turn in conversation_history[-6:]:  # last 6 turns, keeps context relevant and prompt small
+
+            role = "user" if turn["role"] == "user" else "assistant"
+
+            messages.append({
+                "role": role,
+                "content": turn["content"]
+            })
+
+    messages.append({
+        "role": "user",
+        "content": user_request
+    })
 
     try:
 
@@ -135,7 +164,6 @@ def route_request(df, user_request, target_column=None):
 
             return {"tools_used": ["ai_chat (default fallback)"], "result": result}
 
-        # Limit to a maximum of 2 tool calls, even if the model suggests more
         tool_calls = message.tool_calls[:2]
 
         tool_results = []
@@ -146,7 +174,6 @@ def route_request(df, user_request, target_column=None):
 
             result = execute_tool(tool_name, df, user_request, target_column)
 
-            # Check if ML tool needs target column — pause immediately if so
             if isinstance(result, dict) and result.get("needs_target_selection"):
 
                 return {
@@ -157,8 +184,6 @@ def route_request(df, user_request, target_column=None):
 
             tool_results.append({"tool": tool_name, "result": result})
 
-        # ---- Single tool: return directly, no synthesis needed ----
-
         if len(tool_results) == 1:
 
             return {
@@ -166,9 +191,7 @@ def route_request(df, user_request, target_column=None):
                 "result": tool_results[0]["result"]
             }
 
-        # ---- Two tools: synthesize combined answer ----
-
-        final_answer = _synthesize_final_answer(user_request, tool_results)
+        final_answer = _synthesize_final_answer(user_request, tool_results, conversation_history)
 
         return {
             "tools_used": [r["tool"] for r in tool_results],
