@@ -132,6 +132,25 @@ def show_ml(df):
         )
 
     # =====================================================
+    # Drop DateTime columns — cannot be converted to float
+    # =====================================================
+
+    datetime_cols = feature_df.select_dtypes(include=["datetime", "datetimetz"]).columns.tolist()
+
+    if len(datetime_cols) > 0:
+
+        st.warning(
+            f"⚠️ Dropping {len(datetime_cols)} DateTime column(s) — "
+            f"not supported for ML: {', '.join(datetime_cols)}"
+        )
+
+        feature_df = feature_df.drop(columns=datetime_cols)
+
+        # Update column lists after dropping
+        numeric_cols = [c for c in numeric_cols if c not in datetime_cols]
+        categorical_cols = [c for c in categorical_cols if c not in datetime_cols]
+
+    # =====================================================
     # Encode + Convert to numeric
     # =====================================================
 
@@ -410,149 +429,188 @@ def show_ml(df):
 
         else:
 
-            col1, col2 = st.columns(2)
+            selected_tune_models = st.multiselect(
+                "Select Model(s) to Tune",
+                tunable_models,
+                default=tunable_models[:1],
+                key="tune_model_select"
+            )
 
-            with col1:
+            search_type = st.radio(
+                "Search Method",
+                ["Grid Search", "Randomized Search"],
+                horizontal=True,
+                key="tune_search_type"
+            )
 
-                selected_tune_model = st.selectbox(
-                    "Select Model to Tune",
-                    tunable_models,
-                    key="tune_model_select"
-                )
+            if selected_tune_models:
 
-            with col2:
+                with st.expander("🔍 View Parameter Grid(s) Being Searched"):
 
-                search_type = st.radio(
-                    "Search Method",
-                    ["Grid Search", "Randomized Search"],
-                    horizontal=True,
-                    key="tune_search_type"
-                )
+                    for m in selected_tune_models:
 
-            with st.expander("🔍 View Parameter Grid Being Searched"):
-
-                st.json(PARAM_GRIDS.get(selected_tune_model, {}))
+                        st.markdown(f"**{m}**")
+                        st.json(PARAM_GRIDS.get(m, {}))
 
             if st.button("🚀 Run Hyperparameter Tuning"):
 
-                fresh_models = get_models(problem_type, "🚀 Full AutoML")
+                if not selected_tune_models:
 
-                if selected_tune_model not in fresh_models:
-
-                    fresh_models = get_models(problem_type, "⚡ Quick Train")
-
-                base_model = fresh_models.get(selected_tune_model)
-
-                if base_model is None:
-
-                    st.error("Could not reconstruct the base model for tuning.")
+                    st.warning("Please select at least one model to tune.")
 
                 else:
 
-                    with st.spinner(f"Running {search_type} on {selected_tune_model}... this may take a moment."):
+                    tuning_results = {}
 
-                        try:
+                    for model_name in selected_tune_models:
 
-                            # Fit the base model first (untuned baseline)
-                            base_model.fit(X_train, y_train)
+                        fresh_models = get_models(problem_type, "🚀 Full AutoML")
 
-                            tuning_result = tune_hyperparameters(
-                                model=base_model,
-                                model_name=selected_tune_model,
-                                X_train=X_train,
-                                y_train=y_train,
-                                X_test=X_test,
-                                y_test=y_test,
-                                problem_type=problem_type,
-                                search_type=search_type
+                        if model_name not in fresh_models:
+
+                            fresh_models = get_models(problem_type, "⚡ Quick Train")
+
+                        base_model = fresh_models.get(model_name)
+
+                        if base_model is None:
+
+                            tuning_results[model_name] = {
+                                "error": "Could not reconstruct the base model for tuning."
+                            }
+
+                            continue
+
+                        with st.spinner(f"Running {search_type} on {model_name}... this may take a moment."):
+
+                            try:
+
+                                # Fit the base model first (untuned baseline)
+                                base_model.fit(X_train, y_train)
+
+                                result = tune_hyperparameters(
+                                    model=base_model,
+                                    model_name=model_name,
+                                    X_train=X_train,
+                                    y_train=y_train,
+                                    X_test=X_test,
+                                    y_test=y_test,
+                                    problem_type=problem_type,
+                                    search_type=search_type
+                                )
+
+                            except Exception as e:
+
+                                result = {"error": f"Tuning failed: {e}"}
+
+                        tuning_results[model_name] = result
+
+                    st.session_state["tuning_results"] = tuning_results
+
+            # =================================================
+            # Render tuning results (multi-model comparison)
+            # =================================================
+
+            if "tuning_results" in st.session_state:
+
+                tuning_results = st.session_state["tuning_results"]
+
+                valid_results = {
+                    m: r for m, r in tuning_results.items() if "error" not in r
+                }
+
+                failed_results = {
+                    m: r for m, r in tuning_results.items() if "error" in r
+                }
+
+                for m, r in failed_results.items():
+
+                    st.warning(f"⚠️ {m}: {r['error']}")
+
+                if valid_results:
+
+                    st.success("✅ Tuning Completed")
+
+                    score_label = list(valid_results.values())[0]["score_label"]
+
+                    # ---- Comparison table across all tuned models ----
+
+                    st.markdown("#### 📊 Model Comparison — Before vs After Tuning")
+
+                    comparison_rows = []
+
+                    for m, r in valid_results.items():
+
+                        comparison_rows.append({
+                            "Model": m,
+                            f"Before ({score_label})": r["before_score"],
+                            f"After ({score_label})": r["after_score"],
+                            "Improvement": r["improvement"],
+                            "Tuning Time (s)": r["tuning_time"]
+                        })
+
+                    comparison_df = pd.DataFrame(comparison_rows).sort_values(
+                        by=f"After ({score_label})", ascending=False
+                    ).reset_index(drop=True)
+
+                    st.dataframe(comparison_df, use_container_width=True)
+
+                    best_tuned_name = comparison_df.iloc[0]["Model"]
+
+                    st.info(f"🏆 Best model after tuning: **{best_tuned_name}**")
+
+                    # ---- Per-model details ----
+
+                    for m, r in valid_results.items():
+
+                        with st.expander(f"🔍 Details — {m}"):
+
+                            best_params_df = pd.DataFrame(
+                                list(r["best_params"].items()),
+                                columns=["Parameter", "Best Value"]
                             )
 
-                        except Exception as e:
+                            st.dataframe(best_params_df, use_container_width=True)
 
-                            tuning_result = {"error": f"Tuning failed: {e}"}
+                            if r["improvement"] > 0:
 
-                    if "error" in tuning_result:
+                                st.success(
+                                    f"🎉 Improved {score_label} by {r['improvement']:.4f} "
+                                    f"({r['improvement']*100:.2f}%)."
+                                )
 
-                        st.warning(tuning_result["error"])
+                            elif r["improvement"] == 0:
 
-                    else:
+                                st.info(
+                                    "No improvement — the default parameters were already "
+                                    "optimal for this search space."
+                                )
 
-                        st.success("✅ Tuning Completed")
+                            else:
 
-                        # ---- Before vs After Comparison ----
+                                st.warning(
+                                    "The tuned model performed slightly worse on this test "
+                                    "split. This can happen with small datasets or high "
+                                    "variance — consider a different search space or more "
+                                    "cross-validation folds."
+                                )
 
-                        st.markdown("#### 📊 Before vs After Comparison")
+                    # ---- Download a tuned model ----
 
-                        col1, col2, col3 = st.columns(3)
+                    st.markdown("---")
 
-                        col1.metric(
-                            f"Before Tuning ({tuning_result['score_label']})",
-                            f"{tuning_result['before_score']:.4f}"
-                        )
+                    download_choice = st.selectbox(
+                        "Select tuned model to download",
+                        list(valid_results.keys()),
+                        key="tuned_download_select"
+                    )
 
-                        col2.metric(
-                            f"After Tuning ({tuning_result['score_label']})",
-                            f"{tuning_result['after_score']:.4f}",
-                            delta=f"{tuning_result['improvement']:+.4f}"
-                        )
+                    tuned_model_bytes = pickle.dumps(
+                        valid_results[download_choice]["tuned_model"]
+                    )
 
-                        col3.metric(
-                            "Tuning Time",
-                            f"{tuning_result['tuning_time']:.2f} sec"
-                        )
-
-                        # ---- Best Parameters Found ----
-
-                        st.markdown("#### 🏆 Best Parameters Found")
-
-                        best_params_df = pd.DataFrame(
-                            list(tuning_result["best_params"].items()),
-                            columns=["Parameter", "Best Value"]
-                        )
-
-                        st.dataframe(best_params_df, use_container_width=True)
-
-                        # ---- Interpretation ----
-
-                        if tuning_result["improvement"] > 0:
-
-                            st.success(
-                                f"🎉 Tuning improved {tuning_result['score_label']} by "
-                                f"{tuning_result['improvement']:.4f} "
-                                f"({tuning_result['improvement']*100:.2f}%)."
-                            )
-
-                        elif tuning_result["improvement"] == 0:
-
-                            st.info(
-                                "No improvement — the default parameters were already optimal "
-                                "for this search space."
-                            )
-
-                        else:
-
-                            st.warning(
-                                "The tuned model performed slightly worse on this test split. "
-                                "This can happen with small datasets or high variance — consider "
-                                "a different search space or more cross-validation folds."
-                            )
-
-                        # ---- Store tuned model for download ----
-
-                        st.session_state["tuned_model"] = tuning_result["tuned_model"]
-                        st.session_state["tuned_model_name"] = selected_tune_model
-
-            # ---- Download tuned model if available ----
-
-            if "tuned_model" in st.session_state:
-
-                st.markdown("---")
-
-                tuned_model_bytes = pickle.dumps(st.session_state["tuned_model"])
-
-                st.download_button(
-                    label=f"⬇ Download Tuned Model ({st.session_state['tuned_model_name']}.pkl)",
-                    data=tuned_model_bytes,
-                    file_name=f"{st.session_state['tuned_model_name'].replace(' ', '_')}_tuned.pkl",
-                    mime="application/octet-stream"
-                )
+                    st.download_button(
+                        label=f"⬇ Download Tuned Model ({download_choice}.pkl)",
+                        data=tuned_model_bytes,
+                        file_name=f"{download_choice.replace(' ', '_')}_tuned.pkl",
+                        mime="application/octet-stream"
+                    )

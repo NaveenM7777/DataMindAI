@@ -13,6 +13,7 @@ from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 
 PARAM_GRIDS = {
 
+    
     "Logistic Regression": {
         "C": [0.01, 0.1, 1, 10, 100],
         "solver": ["lbfgs", "liblinear"]
