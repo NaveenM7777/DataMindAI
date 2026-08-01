@@ -21,8 +21,8 @@ from app.model_visualization import (
 from app.hyperparameter_tuning import (
     tune_hyperparameters,
     has_tunable_params,
-    PARAM_GRIDS,
-    is_slow_model
+    is_slow_model,
+    PARAM_GRIDS
 )
 
 
@@ -64,7 +64,7 @@ def show_ml(df):
         return
 
     # =====================================================
-    # Drop rows where target is missing (BEFORE building X/y)
+    # Drop rows where target is missing
     # =====================================================
 
     if df[target].isnull().sum() > 0:
@@ -78,7 +78,6 @@ def show_ml(df):
 
     # =====================================================
     # 🛡️ Automatic Safety-Net Preprocessing
-    # (runs even if user skipped the Preprocessing tab)
     # =====================================================
 
     st.markdown("---")
@@ -87,8 +86,27 @@ def show_ml(df):
 
     feature_df = df[features].copy()
 
-    numeric_cols = feature_df.select_dtypes(include=["int64", "float64", "int32", "float32"]).columns.tolist()
-    categorical_cols = feature_df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+    # ---- Drop DateTime columns — cannot be converted to float ----
+    datetime_cols = feature_df.select_dtypes(
+        include=["datetime", "datetimetz", "datetime64", "datetime64[ns]"]
+    ).columns.tolist()
+
+    if len(datetime_cols) > 0:
+
+        st.warning(
+            f"⚠️ Dropping {len(datetime_cols)} DateTime column(s) — "
+            f"not supported for ML: {', '.join(datetime_cols)}"
+        )
+
+        feature_df = feature_df.drop(columns=datetime_cols)
+
+    numeric_cols = feature_df.select_dtypes(
+        include=["int64", "float64", "int32", "float32"]
+    ).columns.tolist()
+
+    categorical_cols = feature_df.select_dtypes(
+        include=["object", "category", "bool"]
+    ).columns.tolist()
 
     total_missing = feature_df.isnull().sum().sum()
 
@@ -99,16 +117,12 @@ def show_ml(df):
             f"Auto-filling: numeric columns with median, categorical columns with mode."
         )
 
-        # ---- Numeric columns: fill with median ----
         for col in numeric_cols:
 
             if feature_df[col].isnull().sum() > 0:
 
-                median_val = feature_df[col].median()
+                feature_df[col] = feature_df[col].fillna(feature_df[col].median())
 
-                feature_df[col] = feature_df[col].fillna(median_val)
-
-        # ---- Categorical columns: fill with mode ----
         for col in categorical_cols:
 
             if feature_df[col].isnull().sum() > 0:
@@ -133,34 +147,11 @@ def show_ml(df):
         )
 
     # =====================================================
-    # Drop DateTime columns — cannot be converted to float
-    # =====================================================
-
-    datetime_cols = feature_df.select_dtypes(include=["datetime", "datetimetz"]).columns.tolist()
-
-    if len(datetime_cols) > 0:
-
-        st.warning(
-            f"⚠️ Dropping {len(datetime_cols)} DateTime column(s) — "
-            f"not supported for ML: {', '.join(datetime_cols)}"
-        )
-
-        feature_df = feature_df.drop(columns=datetime_cols)
-
-        # Update column lists after dropping
-        numeric_cols = [c for c in numeric_cols if c not in datetime_cols]
-        categorical_cols = [c for c in categorical_cols if c not in datetime_cols]
-
-    # =====================================================
     # Encode + Convert to numeric
     # =====================================================
 
-    X = pd.get_dummies(
-        feature_df,
-        drop_first=True
-    ).astype(float)
+    X = pd.get_dummies(feature_df, drop_first=True).astype(float)
 
-    # Final safety check — replace any leftover inf/-inf
     X = X.replace([float("inf"), float("-inf")], pd.NA)
 
     if X.isnull().sum().sum() > 0:
@@ -204,13 +195,9 @@ def show_ml(df):
     st.info(f"Auto-Detected : {auto_detected}")
 
     problem_type = st.radio(
-
         "Confirm Problem Type",
-
         ["Classification", "Regression"],
-
         index=0 if auto_detected == "Classification" else 1
-
     )
 
     if problem_type == "Regression":
@@ -225,7 +212,6 @@ def show_ml(df):
             )
 
             valid_idx = y.dropna().index
-
             X = X.loc[valid_idx]
             y = y.loc[valid_idx]
 
@@ -242,11 +228,8 @@ def show_ml(df):
     st.subheader("⚡ Training Mode")
 
     training_mode = st.radio(
-
         "Choose Training Mode",
-
         ["⚡ Quick Train", "🚀 Full AutoML"]
-
     )
 
     # =====================================================
@@ -279,11 +262,9 @@ def show_ml(df):
             return
 
         X_train, X_test, y_train, y_test = train_test_split(
-
             X, y,
             test_size=test_size,
             random_state=int(random_state)
-
         )
 
         with st.spinner("Training Models..."):
@@ -296,10 +277,8 @@ def show_ml(df):
                     trained_model,
                     prediction
                 ) = train_all_models(
-
                     X_train, X_test, y_train, y_test,
                     problem_type, training_mode
-
                 )
 
             except Exception as e:
@@ -309,34 +288,32 @@ def show_ml(df):
 
         st.success("✅ Training Completed")
 
-        st.session_state["ml_result_df"] = result_df
+        st.session_state["ml_result_df"]      = result_df
         st.session_state["ml_best_model_name"] = best_model
-        st.session_state["ml_trained_model"] = trained_model
-        st.session_state["ml_prediction"] = prediction
-        st.session_state["ml_X_test"] = X_test
-        st.session_state["ml_X_train"] = X_train
-        st.session_state["ml_y_test"] = y_test
-        st.session_state["ml_y_train"] = y_train
-        st.session_state["ml_problem_type"] = problem_type
+        st.session_state["ml_trained_model"]   = trained_model
+        st.session_state["ml_prediction"]      = prediction
+        st.session_state["ml_X_test"]          = X_test
+        st.session_state["ml_X_train"]         = X_train
+        st.session_state["ml_y_test"]          = y_test
+        st.session_state["ml_y_train"]         = y_train
+        st.session_state["ml_problem_type"]    = problem_type
 
-        # Clear any previous tuning results since a fresh training run happened
         st.session_state.pop("tuning_results", None)
 
     # =====================================================
-    # Render results (from session_state so they persist
-    # across reruns triggered by download buttons)
+    # Render results
     # =====================================================
 
     if "ml_result_df" in st.session_state:
 
-        result_df = st.session_state["ml_result_df"]
-        best_model = st.session_state["ml_best_model_name"]
+        result_df    = st.session_state["ml_result_df"]
+        best_model   = st.session_state["ml_best_model_name"]
         trained_model = st.session_state["ml_trained_model"]
-        prediction = st.session_state["ml_prediction"]
-        X_test = st.session_state["ml_X_test"]
-        X_train = st.session_state["ml_X_train"]
-        y_test = st.session_state["ml_y_test"]
-        y_train = st.session_state["ml_y_train"]
+        prediction   = st.session_state["ml_prediction"]
+        X_test       = st.session_state["ml_X_test"]
+        X_train      = st.session_state["ml_X_train"]
+        y_test       = st.session_state["ml_y_test"]
+        y_train      = st.session_state["ml_y_train"]
         problem_type = st.session_state["ml_problem_type"]
 
         st.markdown("---")
@@ -365,7 +342,7 @@ def show_ml(df):
         )
 
         pred_df = pd.DataFrame({
-            "Actual": y_test.values if hasattr(y_test, "values") else y_test,
+            "Actual":    y_test.values if hasattr(y_test, "values") else y_test,
             "Predicted": prediction
         })
 
@@ -443,8 +420,7 @@ def show_ml(df):
                 st.warning(
                     f"⚠️ You've selected multiple slower models "
                     f"({', '.join(slow_selected)}). Tuning these together may take "
-                    f"longer, especially on cloud deployments. Consider tuning one "
-                    f"at a time for faster, more reliable results."
+                    f"longer. Consider tuning one at a time for faster results."
                 )
 
             search_type = st.radio(
@@ -491,11 +467,10 @@ def show_ml(df):
 
                             continue
 
-                        with st.spinner(f"Running {search_type} on {model_name}... this may take a moment."):
+                        with st.spinner(f"Running {search_type} on {model_name}..."):
 
                             try:
 
-                                # Fit the base model first (untuned baseline)
                                 base_model.fit(X_train, y_train)
 
                                 result = tune_hyperparameters(
@@ -518,20 +493,15 @@ def show_ml(df):
                     st.session_state["tuning_results"] = tuning_results
 
             # =================================================
-            # Render tuning results (multi-model comparison)
+            # Render tuning results
             # =================================================
 
             if "tuning_results" in st.session_state:
 
                 tuning_results = st.session_state["tuning_results"]
 
-                valid_results = {
-                    m: r for m, r in tuning_results.items() if "error" not in r
-                }
-
-                failed_results = {
-                    m: r for m, r in tuning_results.items() if "error" in r
-                }
+                valid_results  = {m: r for m, r in tuning_results.items() if "error" not in r}
+                failed_results = {m: r for m, r in tuning_results.items() if "error" in r}
 
                 for m, r in failed_results.items():
 
@@ -543,8 +513,6 @@ def show_ml(df):
 
                     score_label = list(valid_results.values())[0]["score_label"]
 
-                    # ---- Comparison table across all tuned models ----
-
                     st.markdown("#### 📊 Model Comparison — Before vs After Tuning")
 
                     comparison_rows = []
@@ -554,9 +522,9 @@ def show_ml(df):
                         comparison_rows.append({
                             "Model": m,
                             f"Before ({score_label})": r["before_score"],
-                            f"After ({score_label})": r["after_score"],
-                            "Improvement": r["improvement"],
-                            "Tuning Time (s)": r["tuning_time"]
+                            f"After ({score_label})":  r["after_score"],
+                            "Improvement":             r["improvement"],
+                            "Tuning Time (s)":         r["tuning_time"]
                         })
 
                     comparison_df = pd.DataFrame(comparison_rows).sort_values(
@@ -568,8 +536,6 @@ def show_ml(df):
                     best_tuned_name = comparison_df.iloc[0]["Model"]
 
                     st.info(f"🏆 Best model after tuning: **{best_tuned_name}**")
-
-                    # ---- Per-model details ----
 
                     for m, r in valid_results.items():
 
@@ -604,8 +570,6 @@ def show_ml(df):
                                     "variance — consider a different search space or more "
                                     "cross-validation folds."
                                 )
-
-                    # ---- Download a tuned model ----
 
                     st.markdown("---")
 
