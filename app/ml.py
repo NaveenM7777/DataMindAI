@@ -21,7 +21,8 @@ from app.model_visualization import (
 from app.hyperparameter_tuning import (
     tune_hyperparameters,
     has_tunable_params,
-    PARAM_GRIDS
+    PARAM_GRIDS,
+    is_slow_model
 )
 
 
@@ -319,8 +320,7 @@ def show_ml(df):
         st.session_state["ml_problem_type"] = problem_type
 
         # Clear any previous tuning results since a fresh training run happened
-        st.session_state.pop("tuned_model", None)
-        st.session_state.pop("tuned_model_name", None)
+        st.session_state.pop("tuning_results", None)
 
     # =====================================================
     # Render results (from session_state so they persist
@@ -435,6 +435,17 @@ def show_ml(df):
                 default=tunable_models[:1],
                 key="tune_model_select"
             )
+
+            slow_selected = [m for m in selected_tune_models if is_slow_model(m)]
+
+            if len(slow_selected) > 1:
+
+                st.warning(
+                    f"⚠️ You've selected multiple slower models "
+                    f"({', '.join(slow_selected)}). Tuning these together may take "
+                    f"longer, especially on cloud deployments. Consider tuning one "
+                    f"at a time for faster, more reliable results."
+                )
 
             search_type = st.radio(
                 "Search Method",

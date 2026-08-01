@@ -6,80 +6,76 @@ from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 
 
 # ==========================================================
-# Parameter Grids — one per model type
+# Parameter Grids — kept small and cloud-safe
 # ==========================================================
-# Kept intentionally small/reasonable so GridSearch finishes
-# in a reasonable time on typical datasets.
+# Slow models (XGBoost, CatBoost, Gradient Boosting, Random
+# Forest, Extra Trees) use deliberately small grids to avoid
+# timeouts on constrained cloud environments.
 
 PARAM_GRIDS = {
 
-    
     "Logistic Regression": {
-        "C": [0.01, 0.1, 1, 10, 100],
+        "C": [0.01, 0.1, 1, 10],
         "solver": ["lbfgs", "liblinear"]
     },
 
     "Decision Tree": {
         "max_depth": [3, 5, 10, None],
-        "min_samples_split": [2, 5, 10],
-        "criterion": ["gini", "entropy"]
+        "min_samples_split": [2, 5, 10]
     },
 
     "Random Forest": {
-        "n_estimators": [100, 200, 300],
-        "max_depth": [5, 10, None],
-        "min_samples_split": [2, 5]
+        "n_estimators": [100, 200],
+        "max_depth": [5, 10, None]
     },
 
     "Extra Trees": {
-        "n_estimators": [100, 200, 300],
-        "max_depth": [5, 10, None],
-        "min_samples_split": [2, 5]
+        "n_estimators": [100, 200],
+        "max_depth": [5, 10, None]
     },
 
     "KNN": {
-        "n_neighbors": [3, 5, 7, 9, 11],
+        "n_neighbors": [3, 5, 7, 9],
         "weights": ["uniform", "distance"]
     },
 
     "SVM": {
         "C": [0.1, 1, 10],
-        "kernel": ["linear", "rbf"],
-        "gamma": ["scale", "auto"]
+        "kernel": ["linear", "rbf"]
     },
 
     "AdaBoost": {
-        "n_estimators": [50, 100, 200],
-        "learning_rate": [0.01, 0.1, 1.0]
+        "n_estimators": [50, 100],
+        "learning_rate": [0.1, 1.0]
     },
 
     "Gradient Boosting": {
-        "n_estimators": [100, 200],
-        "learning_rate": [0.01, 0.1, 0.2],
+        "n_estimators": [100],
+        "learning_rate": [0.05, 0.1],
         "max_depth": [3, 5]
     },
 
     "XGBoost": {
-        "n_estimators": [100, 200],
-        "learning_rate": [0.01, 0.1, 0.2],
-        "max_depth": [3, 5, 7]
+        "n_estimators": [100],
+        "learning_rate": [0.05, 0.1],
+        "max_depth": [3, 5]
     },
 
     "LightGBM": {
-        "n_estimators": [100, 200],
-        "learning_rate": [0.01, 0.1, 0.2],
-        "num_leaves": [15, 31, 63]
+        "n_estimators": [100],
+        "learning_rate": [0.05, 0.1],
+        "num_leaves": [15, 31]
     },
 
     "CatBoost": {
-        "iterations": [100, 200],
-        "learning_rate": [0.01, 0.1, 0.2],
-        "depth": [4, 6, 8]
+        "iterations": [100],
+        "learning_rate": [0.05, 0.1],
+        "depth": [4, 6]
     },
 
     # ---- Regression versions ----
 
-    "Linear Regression": {},  # No meaningful hyperparameters to tune
+    "Linear Regression": {},
 
     "Ridge": {
         "alpha": [0.01, 0.1, 1, 10, 100]
@@ -96,10 +92,13 @@ PARAM_GRIDS = {
 
     "SVR": {
         "C": [0.1, 1, 10],
-        "kernel": ["linear", "rbf"],
-        "gamma": ["scale", "auto"]
+        "kernel": ["linear", "rbf"]
     },
 }
+
+# Models known to be slow per-fit — used to warn users and
+# force lighter search settings automatically.
+SLOW_MODELS = {"XGBoost", "CatBoost", "Gradient Boosting", "Random Forest", "Extra Trees"}
 
 
 def has_tunable_params(model_name):
@@ -107,6 +106,11 @@ def has_tunable_params(model_name):
     grid = PARAM_GRIDS.get(model_name, {})
 
     return len(grid) > 0
+
+
+def is_slow_model(model_name):
+
+    return model_name in SLOW_MODELS
 
 
 def tune_hyperparameters(
@@ -122,14 +126,9 @@ def tune_hyperparameters(
 ):
     """
     Runs GridSearchCV or RandomizedSearchCV on the given model using its
-    predefined parameter grid.
-
-    Returns a dict with:
-        - before_score, after_score
-        - best_params
-        - tuned_model
-        - training_time
-        - improvement
+    predefined parameter grid. Uses n_jobs=1 throughout to stay safe on
+    constrained cloud environments (Streamlit Cloud kills processes that
+    request more parallel workers than available, often silently).
     """
 
     param_grid = PARAM_GRIDS.get(model_name, {})
@@ -146,10 +145,9 @@ def tune_hyperparameters(
 
     if problem_type == "Classification":
 
-        before_pred = model.predict(X_test)
-
         from sklearn.metrics import accuracy_score
 
+        before_pred = model.predict(X_test)
         before_score = accuracy_score(y_test, before_pred)
 
     else:
@@ -157,8 +155,11 @@ def tune_hyperparameters(
         from sklearn.metrics import r2_score
 
         before_pred = model.predict(X_test)
-
         before_score = r2_score(y_test, before_pred)
+
+    # ---- Reduce cv folds automatically for slow models ----
+
+    effective_cv = 2 if is_slow_model(model_name) else cv
 
     # ---- Run the search ----
 
@@ -170,19 +171,21 @@ def tune_hyperparameters(
             estimator=model,
             param_grid=param_grid,
             scoring=scoring,
-            cv=cv,
-            n_jobs=-1
+            cv=effective_cv,
+            n_jobs=1
         )
 
     else:  # Randomized Search — faster for large grids
+
+        n_iter = 5 if is_slow_model(model_name) else 8
 
         search = RandomizedSearchCV(
             estimator=model,
             param_distributions=param_grid,
             scoring=scoring,
-            cv=cv,
-            n_iter=10,
-            n_jobs=-1,
+            cv=effective_cv,
+            n_iter=n_iter,
+            n_jobs=1,
             random_state=42
         )
 
